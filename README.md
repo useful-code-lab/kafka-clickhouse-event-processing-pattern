@@ -1,141 +1,114 @@
-# ClickHouse + Kafka
+# Kafka → ClickHouse: паттерн обработки и отслеживания событий
 
-Этот проект демонстрирует интеграцию Kafka с ClickHouse, включая автоматическую генерацию событий и хранение данных.
+Практический пример того, как построить поток обработки событий между **Apache Kafka** и **ClickHouse** на Go.
 
-Сообщения приходят в Kafka, затем потребляются и сохраняются в основной таблице my_table, одновременно создаются события в таблице events.
+Проект показывает, как получать сообщения из Kafka, сохранять данные в ClickHouse, формировать журнал событий и отслеживать новые события без прямого взаимодействия наблюдателя с Kafka.
 
-## Структура проекта
-```
-Producer → Kafka (topic=data_topic)
-          ↓
-          Consumer (вставляет в my_table и создаёт запись в events)
-          
-Kafka Engine (kafka_input) ← читается напрямую из Kafka
-          ↓
-Materialized View kafka_to_events
-          ↓
-MergeTree (events) ← теперь содержит все события
-          ↓
-Events Watcher (наблюдает события ClickHouse)
-```
-```
+## Что можно получить из этого проекта
 
-┌───────────┐
-│ Producer  │
-└─────┬─────┘
-      │ JSON сообщения
-      ▼
-┌──────────────┐
-│ Kafka        │
-│ topic=data_topic │
-└─────┬────────┘
-      │
-      ▼
-┌──────────────┐
-│ Consumer     │
-│ (Go)         │
-│ - my_table   │
-│ - events     │
-└─────┬────────┘
-      │
-      ▼
-┌──────────────┐
-│ ClickHouse   │
-│ Kafka Engine │
-│ kafka_input  │
-└─────┬────────┘
-      │
-      ▼
-┌──────────────┐
-│ Materialized │
-│ View         │
-│ kafka_to_events │
-└─────┬────────┘
-      │
-      ▼
-┌──────────────┐
-│ MergeTree    │
-│ events       │
-└─────┬────────┘
-      │
-      ▼
-┌──────────────┐
-│ Events       │
-│ Watcher      │
-└──────────────┘
-```
+Репозиторий можно использовать как **готовый учебный и практический шаблон** для систем, в которых данные поступают через Kafka, а ClickHouse используется для их хранения, аналитики и обработки событий.
 
-## Основные компоненты
-- **producer** – Go-продюсер, который отправляет JSON-сообщения в Kafka-топик `data_topic`.
-- **consumer** – Go-приложение, которое:
-  1. Создаёт необходимые таблицы ClickHouse.
-  2. Подключается к Kafka-топику и читает сообщения.
-  3. Вставляет данные в `my_table`.
-  4. Создаёт запись в `events` для каждого вставленного объекта.
-  5. Materialized View `kafka_to_events` автоматически переносит данные из таблицы Kafka Engine `kafka_input` в `events`.
+Из проекта можно забрать следующие решения:
 
-- **events_watcher** – Go-приложение, которое наблюдает за событиями в таблице `events` ClickHouse:
-  1. Периодически опрашивает таблицу `events` (например, каждые 3 секунды).
-  2. Выводит информацию о новых событиях в консоль или лог.
-  3. Позволяет отслеживать, какие записи были добавлены в `my_table` и с какими данными.
-  4. Не взаимодействует напрямую с Kafka, работает только с ClickHouse.
+* пример интеграции **Go + Kafka + ClickHouse**;
+* схему передачи данных `Producer → Kafka → Consumer → ClickHouse`;
+* использование **Kafka Engine** внутри ClickHouse;
+* использование **Materialized View** для автоматического переноса данных;
+* отдельную таблицу событий (`events`) как журнал изменений;
+* подход к отслеживанию новых событий из ClickHouse;
+* раздельные `producer`, `consumer` и `events_watcher`, которые можно запускать независимо;
+* Docker Compose-конфигурацию для быстрого локального запуска всей инфраструктуры.
 
-## Сборка и запуск контейнеров
-Сборка
-```bash
-docker compose up --build
-```
-Запуск
-```bash
-docker compose up -d
+Это удобно, если нужно быстро разобраться, **как связать Kafka и ClickHouse в событийной архитектуре**, не собирая демонстрационный стенд с нуля.
+
+---
+
+## Как работает решение
+
+Общий поток данных:
+
+```text
+┌─────────────┐
+│  Producer   │
+│    Go       │
+└──────┬──────┘
+       │ JSON
+       ▼
+┌─────────────┐
+│    Kafka    │
+│ data_topic  │
+└──────┬──────┘
+       │
+       ├──────────────────────┐
+       │                      │
+       ▼                      ▼
+┌─────────────┐       ┌─────────────────┐
+│   Consumer  │       │  Kafka Engine   │
+│     Go      │       │ kafka_input     │
+└──────┬──────┘       └────────┬────────┘
+       │                       │
+       ▼                       ▼
+┌─────────────┐       ┌─────────────────┐
+│  my_table   │       │ Materialized    │
+│  ClickHouse │       │ View            │
+└──────┬──────┘       └────────┬────────┘
+       │                       │
+       │                       ▼
+       │              ┌─────────────────┐
+       └─────────────►│     events      │
+                      │    MergeTree     │
+                      └────────┬────────┘
+                               │
+                               ▼
+                      ┌─────────────────┐
+                      │ Events Watcher  │
+                      │      Go        │
+                      └─────────────────┘
 ```
 
-## Запуск наблюдателя событий из clickhouse
-```bash
-docker exec -it clickhouse-kafka-events_watcher-1 sh
+### Основная идея
+
+Kafka используется как транспорт событий.
+
+ClickHouse принимает данные двумя способами:
+
+1. Go `consumer` получает сообщения из Kafka и записывает их в `my_table`.
+2. ClickHouse самостоятельно читает Kafka через `Kafka Engine`, после чего `Materialized View` переносит данные в `events`.
+
+`events_watcher` периодически проверяет таблицу `events` и обнаруживает новые события.
+
+При этом watcher **не подключается к Kafka напрямую** — он работает только с ClickHouse.
+
+---
+
+## Что демонстрирует проект
+
+### 1. Producer
+
+Go-приложение генерирует JSON-сообщения и отправляет их в Kafka topic:
+
+```text
+data_topic
 ```
-В контейнере
-```bash
-./events_watcher
+
+Пример сообщения:
+
+```json
+{
+  "id": 1,
+  "value": "hello"
+}
 ```
-![title](images/events_watcher.png)
 
-## Запуск консумера
-```bash
-docker exec -it clickhouse-kafka-consumer-1 sh
-```
-В контейнере
-```bash
-./consumer
-```
-![title](images/consumer.png)
+Producer можно использовать как источник тестовых событий для локальной разработки.
 
-## Запуск продюсера
-```bash
-docker exec -it clickhouse-kafka-producer-1 sh
-```
-В контейнере
-```bash
-./producer
-```
-![title](images/producer.png)
+---
 
+### 2. Consumer
 
-## Подключение tabix к clickhouse
-http://localhost:8124
+Go-приложение получает сообщения из Kafka и сохраняет данные в ClickHouse.
 
-![title](images/login.png)
-
-## UI для Apache Kafka
-http://localhost:8080/
-
-![title](images/kafka.png)
-
-## Созданные таблицы
-
-### 1. `my_table`  
-
-Основная таблица для хранения объектов из Kafka:
+Основная таблица:
 
 ```sql
 CREATE TABLE IF NOT EXISTS default.my_table
@@ -146,14 +119,22 @@ CREATE TABLE IF NOT EXISTS default.my_table
 ENGINE = MergeTree()
 ORDER BY id;
 ```
-- id — уникальный идентификатор объекта.
 
-- value — строковое значение/payload.
+Таким образом можно увидеть классический сценарий:
 
-### 2. kafka_input
+```text
+Kafka → Go Consumer → ClickHouse
+```
 
-Kafka Engine — “труба” между Kafka и ClickHouse:
-```SQL
+---
+
+### 3. Kafka Engine
+
+ClickHouse может самостоятельно читать сообщения из Kafka.
+
+Для этого используется таблица:
+
+```sql
 CREATE TABLE IF NOT EXISTS default.kafka_input
 (
     id UInt64,
@@ -166,12 +147,39 @@ SETTINGS
     kafka_group_name = 'ch_group',
     kafka_format = 'JSONEachRow',
     kafka_num_consumers = 1;
-
 ```
 
-### 3. events
-Журнал событий, связанных с объектами из my_table:
-```SQL
+Это позволяет рассмотреть другой вариант интеграции:
+
+```text
+Kafka → ClickHouse Kafka Engine
+```
+
+Без отдельного Go-consumer на этом участке.
+
+---
+
+### 4. Materialized View
+
+Materialized View используется как автоматический маршрут между Kafka Engine и таблицей событий.
+
+```text
+kafka_input
+     ↓
+Materialized View
+     ↓
+events
+```
+
+Такой подход полезен для построения потоковой обработки данных непосредственно средствами ClickHouse.
+
+---
+
+### 5. Event Log
+
+Таблица `events` используется как журнал событий:
+
+```sql
 CREATE TABLE IF NOT EXISTS default.events
 (
     event_id UInt64,
@@ -183,13 +191,291 @@ CREATE TABLE IF NOT EXISTS default.events
 ENGINE = MergeTree()
 ORDER BY event_id;
 ```
-- event_id — уникальный идентификатор события.
-- my_table_id — ссылка на объект из my_table.
-- value — значение из my_table.
-- event_type — тип события (INSERTED, INSERTED_FROM_KAFKA).
-- created_at — время создания события.
 
-## Пример переданных данных в Clickhouse
+В ней сохраняются:
+
+* идентификатор события;
+* идентификатор исходного объекта;
+* данные объекта;
+* тип события;
+* время создания события.
+
+Получается отдельный поток событий, который можно использовать для последующего анализа или обработки.
+
+---
+
+### 6. Events Watcher
+
+`events_watcher` — отдельное Go-приложение, которое периодически проверяет таблицу `events`.
+
+Watcher может обнаруживать новые записи:
+
+```text
+ClickHouse
+    ↓
+events
+    ↓
+Events Watcher
+    ↓
+лог / дальнейшая обработка
+```
+
+Главная особенность — watcher не зависит от Kafka.
+
+Это позволяет рассматривать ClickHouse как источник уже сохранённых событий.
+
+---
+
+# Когда этот проект может быть полезен
+
+Проект особенно полезен как отправная точка, если вы:
+
+* изучаете интеграцию Kafka и ClickHouse;
+* проектируете event-driven архитектуру;
+* хотите сохранять Kafka-события в аналитической БД;
+* ищете пример использования ClickHouse Kafka Engine;
+* хотите понять, как работают Materialized Views для потоковых данных;
+* хотите отделить получение событий от их последующего наблюдения;
+* создаёте прототип сервиса обработки событий;
+* хотите быстро поднять локальный стенд Kafka + ClickHouse + Go.
+
+Вместо того чтобы отдельно собирать Kafka, ClickHouse, producer, consumer и watcher, можно использовать этот репозиторий как **готовую основу для экспериментов и адаптации под собственную задачу**.
+
+---
+
+# Структура проекта
+
+```text
+.
+├── consumer/
+│   └── Go consumer
+│
+├── producer/
+│   └── Go producer
+│
+├── events_watcher/
+│   └── Go watcher событий
+│
+├── images/
+│   └── скриншоты работы
+│
+├── docker-compose.yml
+└── README.md
+```
+
+---
+
+# Быстрый запуск
+
+Для запуска инфраструктуры:
+
+```bash
+docker compose up --build
+```
+
+или в фоновом режиме:
+
+```bash
+docker compose up -d
+```
+
+После запуска будут доступны ClickHouse и Kafka.
+
+---
+
+# Events Watcher
+
+Войти в контейнер:
+
+```bash
+docker exec -it clickhouse-kafka-events_watcher-1 sh
+```
+
+Запустить watcher:
+
+```bash
+./events_watcher
+```
+
+Watcher начнёт отслеживать новые записи в таблице `events`.
+
+![Events Watcher](images/events_watcher.png)
+
+---
+
+# Consumer
+
+Войти в контейнер:
+
+```bash
+docker exec -it clickhouse-kafka-consumer-1 sh
+```
+
+Запустить consumer:
+
+```bash
+./consumer
+```
+
+![Consumer](images/consumer.png)
+
+---
+
+# Producer
+
+Войти в контейнер:
+
+```bash
+docker exec -it clickhouse-kafka-producer-1 sh
+```
+
+Запустить producer:
+
+```bash
+./producer
+```
+
+![Producer](images/producer.png)
+
+---
+
+# ClickHouse
+
+Для подключения к ClickHouse через Tabix:
+
+```text
 http://localhost:8124
-![title](images/data.png)
-![title](images/kafka_input.png)
+```
+
+![ClickHouse](images/login.png)
+
+После отправки сообщений можно посмотреть данные в ClickHouse:
+
+![Data](images/data.png)
+
+Также можно посмотреть таблицу, работающую через Kafka Engine:
+
+![Kafka Input](images/kafka_input.png)
+
+---
+
+# Kafka UI
+
+Web-интерфейс Kafka:
+
+```text
+http://localhost:8080/
+```
+
+![Kafka UI](images/kafka.png)
+
+---
+
+# Таблицы ClickHouse
+
+## `my_table`
+
+Основная таблица с объектами, полученными из Kafka.
+
+```sql
+CREATE TABLE IF NOT EXISTS default.my_table
+(
+    id UInt64,
+    value String
+)
+ENGINE = MergeTree()
+ORDER BY id;
+```
+
+## `kafka_input`
+
+Таблица Kafka Engine, которая читает сообщения из Kafka topic `data_topic`.
+
+```sql
+CREATE TABLE IF NOT EXISTS default.kafka_input
+(
+    id UInt64,
+    value String
+)
+ENGINE = Kafka
+SETTINGS
+    kafka_broker_list = 'kafka:9093',
+    kafka_topic_list = 'data_topic',
+    kafka_group_name = 'ch_group',
+    kafka_format = 'JSONEachRow',
+    kafka_num_consumers = 1;
+```
+
+## `events`
+
+Журнал событий.
+
+```sql
+CREATE TABLE IF NOT EXISTS default.events
+(
+    event_id UInt64,
+    my_table_id UInt64,
+    value String,
+    event_type String,
+    created_at DateTime DEFAULT now()
+)
+ENGINE = MergeTree()
+ORDER BY event_id;
+```
+
+---
+
+# Что можно попробовать изменить
+
+Репозиторий можно использовать как экспериментальную площадку.
+
+Например:
+
+* добавить новые типы событий;
+* изменить структуру JSON-сообщений;
+* добавить новые поля в ClickHouse;
+* изменить период опроса watcher;
+* добавить собственную обработку событий;
+* заменить тестовый producer реальным источником Kafka;
+* добавить дополнительные Materialized Views;
+* использовать `events` как источник для последующей бизнес-логики.
+
+Таким образом, проект можно рассматривать не только как демонстрацию, но и как **минимальный каркас для собственного прототипа событийной системы**.
+
+---
+
+# Технологии
+
+* Go
+* Apache Kafka
+* ClickHouse
+* Kafka Engine
+* Materialized View
+* MergeTree
+* Docker Compose
+* Tabix
+* Kafka UI
+
+---
+
+## Итог
+
+Этот проект показывает несколько способов построения потока:
+
+```text
+Kafka → Go → ClickHouse
+```
+
+и
+
+```text
+Kafka → Kafka Engine → Materialized View → ClickHouse
+```
+
+а также отдельный механизм наблюдения:
+
+```text
+ClickHouse → Events Watcher
+```
+
+Основная ценность репозитория — **готовый воспроизводимый пример**, который можно запустить локально, изучить по частям и использовать как основу для собственных решений с Kafka, ClickHouse и событийной обработкой.
